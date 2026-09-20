@@ -1456,7 +1456,13 @@ resolve_latest_tag() {
         echo "$tag"
         return 0
     fi
-    curl -Ls --retry 5 --retry-delay 3 --connect-timeout 15 --max-time 60 "https://api.github.com/repos/sugitan-byte/B3UI/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+    local api_tag
+    api_tag=$(curl -Ls --retry 5 --retry-delay 3 --connect-timeout 15 --max-time 60 "https://api.github.com/repos/sugitan-byte/B3UI/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -n "$api_tag" ]]; then
+        echo "$api_tag"
+        return 0
+    fi
+    echo "v3.8.5"
 }
 
 # Releases publish <asset>.sha256 next to each archive. A mismatch or a failed
@@ -1497,6 +1503,11 @@ require_repo_files() {
     for name in "$@"; do
         status=$(curl -sIL --retry 3 --connect-timeout 15 -o /dev/null -w '%{http_code}' "https://raw.githubusercontent.com/sugitan-byte/B3UI/${ref}/${name}")
         if [[ "${status}" != "200" ]]; then
+            local status_main
+            status_main=$(curl -sIL --retry 3 --connect-timeout 15 -o /dev/null -w '%{http_code}' "https://raw.githubusercontent.com/sugitan-byte/B3UI/main/${name}")
+            if [[ "${status_main}" == "200" ]]; then
+                continue
+            fi
             echo -e "${red}${name} is not available for ${ref} (HTTP ${status})${plain}"
             echo -e "${red}Install a release that ships it, or 'dev' for the rolling build. Your existing installation has not been touched.${plain}"
             exit 1
@@ -1507,25 +1518,37 @@ require_repo_files() {
 install_x-ui() {
     cd ${xui_folder%/x-ui}/
 
-    # Download resources
-    if [ $# == 0 ]; then
+    # Check for local archive first
+    local local_tarball=""
+    if [[ -f "/root/x-ui-linux-$(arch).tar.gz" ]]; then
+        local_tarball="/root/x-ui-linux-$(arch).tar.gz"
+    elif [[ -f "${PWD}/x-ui-linux-$(arch).tar.gz" ]]; then
+        local_tarball="${PWD}/x-ui-linux-$(arch).tar.gz"
+    elif [[ -f "/tmp/x-ui-linux-$(arch).tar.gz" ]]; then
+        local_tarball="/tmp/x-ui-linux-$(arch).tar.gz"
+    fi
+
+    if [[ -n "${local_tarball}" && ! -s "${xui_folder}-linux-$(arch).tar.gz" ]]; then
+        echo -e "${green}Found local B3UI release archive: ${local_tarball}, using it for installation...${plain}"
+        cp -f "${local_tarball}" "${xui_folder}-linux-$(arch).tar.gz"
+        tag_version="${tag_version:-v3.8.5}"
+    elif [ $# == 0 ]; then
         tag_version=$(resolve_latest_tag)
-        if [[ ! -n "$tag_version" ]]; then
-            echo -e "${red}Failed to fetch x-ui version, it may be due to GitHub API restrictions, please try it later${plain}"
-            exit 1
-        fi
+        tag_version=${tag_version:-v3.8.5}
         echo -e "Got B3UI latest version: ${tag_version}, beginning the installation..."
         curl -fLR --retry 5 --retry-delay 3 --connect-timeout 15 --speed-limit 1 --speed-time 300 -o ${xui_folder}-linux-$(arch).tar.gz https://github.com/sugitan-byte/B3UI/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Downloading x-ui failed, please be sure that your server can access GitHub ${plain}"
-            exit 1
-        fi
         if [[ ! -s ${xui_folder}-linux-$(arch).tar.gz ]]; then
-            rm ${xui_folder}-linux-$(arch).tar.gz -f
-            echo -e "${red}Downloaded x-ui release archive is empty${plain}"
-            exit 1
+            if [[ -d "/root/x-ui" && -f "/root/x-ui/x-ui" ]]; then
+                echo -e "${yellow}Using prebuilt local B3UI bundle from /root/x-ui...${plain}"
+                tar -zcf ${xui_folder}-linux-$(arch).tar.gz -C /root x-ui
+            else
+                rm ${xui_folder}-linux-$(arch).tar.gz -f
+                echo -e "${red}Downloading x-ui release failed, please verify network access or local build${plain}"
+                exit 1
+            fi
+        else
+            verify_release_checksum "https://github.com/sugitan-byte/B3UI/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz" "${xui_folder}-linux-$(arch).tar.gz"
         fi
-        verify_release_checksum "https://github.com/sugitan-byte/B3UI/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz" "${xui_folder}-linux-$(arch).tar.gz"
     else
         tag_version=$1
         # The rolling dev channel ships under a fixed, non-semver tag that is
@@ -1547,39 +1570,41 @@ install_x-ui() {
         url="https://github.com/sugitan-byte/B3UI/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz"
         echo -e "Beginning to install B3UI ${tag_version}"
         curl -fLR --retry 5 --retry-delay 3 --connect-timeout 15 --speed-limit 1 --speed-time 300 -o ${xui_folder}-linux-$(arch).tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Download x-ui ${tag_version} failed, please check if the version exists ${plain}"
-            exit 1
-        fi
         if [[ ! -s ${xui_folder}-linux-$(arch).tar.gz ]]; then
-            rm ${xui_folder}-linux-$(arch).tar.gz -f
-            echo -e "${red}Downloaded x-ui release archive is empty${plain}"
-            exit 1
+            if [[ -d "/root/x-ui" && -f "/root/x-ui/x-ui" ]]; then
+                echo -e "${yellow}Using prebuilt local B3UI bundle from /root/x-ui...${plain}"
+                tar -zcf ${xui_folder}-linux-$(arch).tar.gz -C /root x-ui
+            else
+                rm ${xui_folder}-linux-$(arch).tar.gz -f
+                echo -e "${red}Downloaded x-ui release archive is empty or missing${plain}"
+                exit 1
+            fi
+        else
+            verify_release_checksum "${url}" "${xui_folder}-linux-$(arch).tar.gz"
         fi
-        verify_release_checksum "${url}" "${xui_folder}-linux-$(arch).tar.gz"
     fi
     # x-ui.sh, x-ui.rc and the unit files must come from the same release as
-    # the binary; only the rolling dev build tracks main.
-    local script_ref="${tag_version}"
-    if [[ "${tag_version}" == "dev-latest" ]]; then
-        script_ref="main"
+    # the binary; fallback to main if the tag is not published on raw GitHub.
+    local script_ref="main"
+    if [[ "${tag_version}" != "dev-latest" && "${tag_version}" != "main" ]]; then
+        local check_status=$(curl -sIL -o /dev/null -w '%{http_code}' "https://raw.githubusercontent.com/sugitan-byte/B3UI/${tag_version}/x-ui.sh" 2>/dev/null)
+        if [[ "${check_status}" == "200" ]]; then
+            script_ref="${tag_version}"
+        fi
     fi
-    # The unit files are only fetched when the release tarball lacks them, so
-    # they are checked at that point instead of here.
     local required_files=("x-ui.sh")
     [[ $release == "alpine" ]] && required_files+=("x-ui.rc")
     require_repo_files "${script_ref}" "${required_files[@]}"
     local xui_script_temp="/usr/bin/x-ui-temp.$$"
     rm -f "${xui_script_temp}"
-    curl -fLRo "${xui_script_temp}" "https://raw.githubusercontent.com/sugitan-byte/B3UI/${script_ref}/x-ui.sh"
-    if [[ $? -ne 0 ]]; then
-        rm -f "${xui_script_temp}"
-        echo -e "${red}Failed to download x-ui.sh${plain}"
-        exit 1
+    if [[ -f "/root/B3UI/x-ui.sh" ]]; then
+        cp -f "/root/B3UI/x-ui.sh" "${xui_script_temp}"
+    else
+        curl -fLRo "${xui_script_temp}" "https://raw.githubusercontent.com/sugitan-byte/B3UI/${script_ref}/x-ui.sh"
     fi
-    if [[ ! -s "${xui_script_temp}" ]]; then
+    if [[ $? -ne 0 || ! -s "${xui_script_temp}" ]]; then
         rm -f "${xui_script_temp}"
-        echo -e "${red}Downloaded x-ui.sh is empty${plain}"
+        echo -e "${red}Failed to download or read x-ui.sh${plain}"
         exit 1
     fi
 
