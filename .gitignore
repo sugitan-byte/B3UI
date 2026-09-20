@@ -18,7 +18,8 @@ tmp/
 backup/
 bin/
 x-ui/
-dist/
+/dist/
+!internal/web/dist/
 release/
 node_modules/
 
